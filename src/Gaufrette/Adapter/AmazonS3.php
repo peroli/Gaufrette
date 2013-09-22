@@ -2,7 +2,7 @@
 
 namespace Gaufrette\Adapter;
 
-use \AmazonS3 as AmazonClient;
+use Aws\S3\S3Client as AmazonClient;
 use Gaufrette\Adapter;
 
 /**
@@ -13,7 +13,8 @@ use Gaufrette\Adapter;
  * @author  Leszek Prabucki <leszek.prabucki@gmail.com>
  */
 class AmazonS3 implements Adapter,
-                          MetadataSupporter
+                          MetadataSupporter,
+                          ListKeysAware
 {
     protected $service;
     protected $bucket;
@@ -26,12 +27,15 @@ class AmazonS3 implements Adapter,
         $this->service = $service;
         $this->bucket  = $bucket;
         $this->options = array_replace_recursive(
-            array('directory' => '', 'create' => false, 'region' => AmazonClient::REGION_US_E1, 'acl' => AmazonClient::ACL_PUBLIC),
+            array(
+                'directory' => '', 'create' => false, 'region' => '',
+                'acl' => ''
+            ),
             $options
         );
     }
 
-    /** 
+    /**
      * Set the acl used when writing files
      *
      * @param string $acl
@@ -43,7 +47,7 @@ class AmazonS3 implements Adapter,
 
     /**
      * Get the acl used when writing files
-     * 
+     *
      * @return string
      */
     public function getAcl()
@@ -97,18 +101,13 @@ class AmazonS3 implements Adapter,
     public function read($key)
     {
         $this->ensureBucketExists();
-
-        $response = $this->service->get_object(
-            $this->bucket,
-            $this->computePath($key),
-            $this->getMetadata($key)
-        );
-
-        if (!$response->isOK()) {
-            return false;
-        }
-
-        return $response->body;
+        $options = [
+            'Bucket' => $this->bucket,
+            'Key' => $this->computePath($key)
+        ];
+        $options = array_merge($options, $this->getMetadata($key));
+        $response = $this->service->getObject($options);
+        return $response->get('Body');
     }
 
     /**
@@ -117,20 +116,16 @@ class AmazonS3 implements Adapter,
     public function rename($sourceKey, $targetKey)
     {
         $this->ensureBucketExists();
+        $options = [
+            'Bucket'   => $this->bucket,
+            'CopySource' => $this->bucket . '/'. $this->computePath($sourceKey),
+            'Key' => $this->computePath($targetKey)
+        ];
+        $options = array_merge($options, $this->getMetadata($sourceKey));
+        $response = $this->service->copyObject($options);
+        $this->delete($sourceKey);
 
-        $response = $this->service->copy_object(
-            array( // source
-                'bucket'   => $this->bucket,
-                'filename' => $this->computePath($sourceKey)
-            ),
-            array( // target
-                'bucket'   => $this->bucket,
-                'filename' => $this->computePath($targetKey)
-            ),
-            $this->getMetadata($sourceKey)
-        );
-
-        return $response->isOK() && $this->delete($sourceKey);
+        return $response;
     }
 
     /**
@@ -141,22 +136,18 @@ class AmazonS3 implements Adapter,
         $this->ensureBucketExists();
 
         $opt = array_replace_recursive(
-            array('acl'  => $this->options['acl']),
+            array('ACL'  => $this->options['acl']),
             $this->getMetadata($key),
-            array('body' => $content)
+            array('Body' => $content)
         );
 
-        $response = $this->service->create_object(
-            $this->bucket,
-            $this->computePath($key),
-            $opt
-        );
+        $options = array_merge($opt, [
+            'Bucket' => $this->bucket,
+            'Key' => $this->computePath($key),
+        ]);
 
-        if (!$response->isOK()) {
-            return false;
-        };
-
-        return intval($response->header["x-aws-requestheaders"]["Content-Length"]);
+        $response = $this->service->putObject($options);
+        return $response;
     }
 
     /**
@@ -166,7 +157,7 @@ class AmazonS3 implements Adapter,
     {
         $this->ensureBucketExists();
 
-        return $this->service->if_object_exists(
+        return $this->service->doesObjectExist(
             $this->bucket,
             $this->computePath($key)
         );
@@ -178,14 +169,15 @@ class AmazonS3 implements Adapter,
     public function mtime($key)
     {
         $this->ensureBucketExists();
+        $options = [
+            'Bucket' => $this->bucket,
+            'Key' => $this->computePath($key),
+        ];
+        $options = array_merge($options, $this->getMetadata($key));
+        $response = $this->service->headObject($options);
+        $lastModified = $response->get('LastModified') || false;
 
-        $response = $this->service->get_object_metadata(
-            $this->bucket,
-            $this->computePath($key),
-            $this->getMetadata($key)
-        );
-
-        return isset($response['Headers']['last-modified']) ? strtotime($response['Headers']['last-modified']) : false;
+        return $lastModified;
     }
 
     /**
@@ -195,7 +187,7 @@ class AmazonS3 implements Adapter,
     {
         $this->ensureBucketExists();
 
-        $list = $this->service->get_object_list($this->bucket);
+        $list = $this->service->listObjects(['Bucket' => $this->bucket]);
 
         $keys = array();
         foreach ($list as $file) {
@@ -212,17 +204,24 @@ class AmazonS3 implements Adapter,
     /**
      * {@inheritDoc}
      */
+    public function listKeys($prefix = '') {
+        die('To write list keys method');
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     public function delete($key)
     {
         $this->ensureBucketExists();
+        $options = [
+            'Bucket' => $this->bucket,
+            'Key' => $this->computePath($key),
+        ];
+        $options = array_merge($options, $this->getMetadata($key));
+        $response = $this->service->deleteObject($options);
 
-        $response = $this->service->delete_object(
-            $this->bucket,
-            $this->computePath($key),
-            $this->getMetadata($key)
-        );
-
-        return $response->isOK();
+        return $response;
     }
 
     /**
@@ -252,10 +251,10 @@ class AmazonS3 implements Adapter,
         }
 
         if (isset($this->options['region'])) {
-            $this->service->set_region($this->options['region']);
+            $this->service->setRegion($this->options['region']);
         }
 
-        if ($this->service->if_bucket_exists($this->bucket)) {
+        if ($this->service->doesBucketExist($this->bucket)) {
             $this->ensureBucket = true;
 
             return;
@@ -268,17 +267,10 @@ class AmazonS3 implements Adapter,
             ));
         }
 
-        $response = $this->service->create_bucket(
-            $this->bucket,
-            $this->options['region']
-        );
-
-        if (!$response->isOK()) {
-            throw new \RuntimeException(sprintf(
-                'Failed to create the configured bucket "%s".',
-                $this->bucket
-            ));
-        }
+        $response = $this->service->createBucket([
+            'Bucket' => $this->bucket,
+            'LocationConstraint' => $this->options['region']
+        ]);
 
         $this->ensureBucket = true;
     }
