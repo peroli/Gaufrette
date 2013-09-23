@@ -204,8 +204,19 @@ class AmazonS3 implements Adapter,
     /**
      * {@inheritDoc}
      */
-    public function listKeys($prefix = '') {
-        die('To write list keys method');
+    public function listKeys($prefix = '/') {
+        $list = $this->service->getIterator('ListObjects', array(
+            'Bucket' => $this->bucket,
+            'Prefix' => $prefix
+        ));
+        $keys = array();
+        foreach ($list as $object) {
+            $keys[] = $object['Key'];
+        }
+        return array(
+            'keys' => $keys,
+            'dirs' => array()
+        );
     }
 
     /**
